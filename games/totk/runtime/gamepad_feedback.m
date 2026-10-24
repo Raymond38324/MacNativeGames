@@ -23,6 +23,7 @@
 #if !TARGET_OS_OSX
 void runtime_feedback_attach(GCController *c) { (void)c; }
 void runtime_feedback_detach(GCController *c) { (void)c; }
+void runtime_feedback_stick_start(GCController *c) { (void)c; }
 void runtime_feedback_quiet(void) {}
 void runtime_rumble_set(unsigned side, float al, float fl, float ah, float fh) { (void)side; (void)al; (void)fl; (void)ah; (void)fh; }
 #else
@@ -165,6 +166,8 @@ static void rumble_start(void) {
 
 /* ---- motion: the math is in runtime/motion_fusion.c ---- */
 static GCController *motionPad;  /* main queue */
+static GCController *stickPad;   /* main queue: the Switch Pro whose left stick is read from HID (the left-stick fallback) */
+static BOOL hidMotionActive;     /* main queue: the raw HID stream also feeds the gyro (GameController's was all zeros) */
 static void hid_motion_start(void);
 static void hid_motion_stop(void);
 static uint64_t zeroSince;          /* the controller's handler queue */
@@ -240,8 +243,9 @@ static void hid_report(void *ctx, IOReturn result, void *sender, IOHIDReportType
         return;
     }
     if (id != 0x30) return;
-    runtime_gamepad_switch_left((__bridge void *)motionPad,
+    runtime_gamepad_switch_left((__bridge void *)(stickPad ? stickPad : motionPad),
         p[6] | (p[7] & 15) << 8, (p[7] >> 4) | p[8] << 4);
+    if (!hidMotionActive) return;   /* the left stick is read from HID; the gyro stays on GameController */
     uint64_t now = runtime_now_ns(), step = hidLast && now - hidLast < 50000000ull ? (now - hidLast) / 3 : 5000000ull;
     hidLast = now;
     for (int k = 0; k < 3; k++) {
@@ -254,22 +258,31 @@ static void hid_report(void *ctx, IOReturn result, void *sender, IOHIDReportType
         runtime_motion_feed(acc, gyro, now - (uint64_t)(2 - k) * step);
     }
 }
-static void hid_motion_start(void) {   /* main queue */
-    if (!motionPad || hidDevice) return;
-    const char *name = (motionPad.vendorName ?: @"controller").UTF8String;
+/* Open the Switch Pro (057e:2009) raw input stream once, for the gyro and/or the left-stick fallback. Main queue; idempotent. */
+static IOReturn hid_stream_open(void) {
+    if (hidDevice) return kIOReturnSuccess;
     hidManager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     IOHIDManagerSetDeviceMatching(hidManager, (__bridge CFDictionaryRef)@{@kIOHIDVendorIDKey: @0x057e, @kIOHIDProductIDKey: @0x2009});
     NSSet *devices = (__bridge_transfer NSSet *)IOHIDManagerCopyDevices(hidManager);
     IOHIDDeviceRef d = (__bridge IOHIDDeviceRef)devices.anyObject;
     IOReturn r = d ? IOHIDDeviceOpen(d, kIOHIDOptionsTypeNone) : kIOReturnNotFound;
-    if (r != kIOReturnSuccess) {
-        fprintf(stderr, "[gyro] %s: GameController's motion is all zeros and no Switch Pro HID device could be opened (0x%x): no motion from it\n", name, r);
-        CFRelease(hidManager); hidManager = NULL; return;
-    }
+    if (r != kIOReturnSuccess) { CFRelease(hidManager); hidManager = NULL; return r; }
     hidDevice = (IOHIDDeviceRef)CFRetain(d); hidLast = 0; hidUserCalibration = NO;
-    motionPad.motion.valueChangedHandler = nil;   /* sensors stay active: GameController keeps the IMU reporting */
     IOHIDDeviceScheduleWithRunLoop(hidDevice, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     IOHIDDeviceRegisterInputReportCallback(hidDevice, hidReport, sizeof hidReport, hid_report, NULL);
+    return kIOReturnSuccess;
+}
+
+static void hid_motion_start(void) {   /* main queue */
+    if (!motionPad || hidMotionActive) return;
+    const char *name = (motionPad.vendorName ?: @"controller").UTF8String;
+    IOReturn r = hid_stream_open();
+    if (r != kIOReturnSuccess) {
+        fprintf(stderr, "[gyro] %s: GameController's motion is all zeros and no Switch Pro HID device could be opened (0x%x): no motion from it\n", name, r);
+        return;
+    }
+    hidMotionActive = YES;
+    motionPad.motion.valueChangedHandler = nil;   /* sensors stay active: GameController keeps the IMU reporting */
     runtime_motion_deadzone_default(1.2); runtime_motion_live(1);
     fprintf(stderr, "[gyro] %s: GameController's motion is all zeros; reading the six-axis sensor from its HID reports\n", name);
     /* IMU on, then the calibrations; spaced out, as the controller drops subcommands sent back to back */
@@ -286,6 +299,15 @@ static void hid_motion_stop(void) {   /* main queue */
     IOHIDDeviceClose(hidDevice, kIOHIDOptionsTypeNone);
     CFRelease(hidDevice); hidDevice = NULL;
     CFRelease(hidManager); hidManager = NULL;
+    hidMotionActive = NO;
+    stickPad = nil;
+}
+
+/* gamepad.m: a Switch Pro that GameController adopted reports a native left stick stuck at zero; open the same raw 0x30
+   stream so the left stick can be read from HID. The gyro stays on GameController unless it, too, is all zeros. */
+void runtime_feedback_stick_start(GCController *c) {   /* main queue */
+    if (!c || hid_stream_open() != kIOReturnSuccess) return;
+    stickPad = c;
 }
 
 /* ---- controllers ---- */

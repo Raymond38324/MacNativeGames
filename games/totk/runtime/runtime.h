@@ -162,4 +162,5 @@ void runtime_feedback_quiet(void);   /* focus lost: stop rumbling */
 @class GCController;
 void runtime_feedback_attach(GCController *controller);
 void runtime_feedback_detach(GCController *controller);
+void runtime_feedback_stick_start(GCController *controller);   /* a Switch Pro's native left stick reads zero: read it from HID */
 #endif

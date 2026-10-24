@@ -32,6 +32,8 @@ static __weak GCController *rawLeftController;
 static SwitchLeftFallback rawLeft;
 static uint64_t gamepadRawLeftAt;
 static int32_t gamepadNativeLx, gamepadNativeLy;
+static uint64_t switchLeftZeroSince;              /* ns: the Switch controller's native left stick has read zero since then */
+static __weak GCController *switchLeftZeroController;
 static void refresh_gamepads(void);
 
 /* Called on the main run loop by the already-open Switch HID motion stream. */
@@ -41,6 +43,24 @@ void runtime_gamepad_switch_left(void *source, int x, int y) {
     rawLeftController = controller;
     switch_left_feed(&rawLeft, x, y, runtime_now_ns());
     refresh_gamepads();
+}
+
+/* A Switch Pro that GameController adopted can leave the native left stick at zero even while the player moves it (the
+   Beitong Zeus 2 does). Once the native axes have read exactly zero for a second, open the raw HID stream so the left
+   stick can be read from it; switch_left_get() then takes over only when the raw stick actually moves. */
+static void arm_switch_left_fallback(GCController *controller, float lx, float ly) {
+    if (fabsf(lx) > 0.0001f || fabsf(ly) > 0.0001f) {
+        if (switchLeftZeroController == controller) { switchLeftZeroController = nil; switchLeftZeroSince = 0; }
+        return;
+    }
+    if (!gamepad_names_nintendo(controller.productCategory.UTF8String) &&
+        !gamepad_names_nintendo(controller.vendorName.UTF8String)) return;
+    uint64_t now = runtime_now_ns();
+    if (switchLeftZeroController != controller) { switchLeftZeroController = controller; switchLeftZeroSince = now; return; }
+    if (switchLeftZeroSince && now - switchLeftZeroSince >= 1000000000ULL) {
+        runtime_feedback_stick_start(controller);
+        switchLeftZeroSince = 0;   /* stick_start is idempotent; don't re-arm on every refresh */
+    }
 }
 
 /* The player's button layout (controller_map.h): TOTK_CONTROLS names the file (the launcher: <data>/controls.txt and
@@ -434,6 +454,7 @@ static void refresh_gamepads(void) {
         next.connected = 1;
         physical |= gamepad_buttons(pad, face_by_position(controller));
         float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
+        arm_switch_left_fallback(controller, lx, ly);
         nativeLx = stronger_axis(nativeLx, stick_axis(lx));
         nativeLy = stronger_axis(nativeLy, stick_axis(ly));
         int wasActive = rawLeft.active;
