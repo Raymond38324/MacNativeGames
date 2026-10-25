@@ -6,6 +6,7 @@ _Noreturn void runtime_fail(const char *message) { fprintf(stderr, "FAIL: %s\n",
 uint64_t runtime_now_ns(void) { return 0; }
 void runtime_feedback_attach(GCController *controller) { (void)controller; }
 void runtime_feedback_detach(GCController *controller) { (void)controller; }
+void runtime_feedback_stick_start(GCController *controller) { (void)controller; }
 void runtime_feedback_quiet(void) {}
 int runtime_gyro_enabled(void) { return 0; }
 void runtime_motion_mouse(int on) { (void)on; }

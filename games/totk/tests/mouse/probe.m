@@ -7,6 +7,7 @@ static uint64_t clockNow = 1000000000ull;
 uint64_t runtime_now_ns(void) { return clockNow; }
 void runtime_feedback_attach(GCController *controller) { (void)controller; }
 void runtime_feedback_detach(GCController *controller) { (void)controller; }
+void runtime_feedback_stick_start(GCController *controller) { (void)controller; }
 void runtime_feedback_quiet(void) {}
 static int gyroOn = 1, motionMouse = -1, feeds, hookCalls;
 static double lastYaw, lastAcc;
