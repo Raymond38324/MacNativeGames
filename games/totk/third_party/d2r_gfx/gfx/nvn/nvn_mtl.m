@@ -720,7 +720,7 @@ void mtl_pool_del(const void *mem) {
         [g_keep removeObjectIdenticalTo:buf];
     }
     pthread_mutex_unlock(&g_mu);
-    if (hi > lo) { stor_drop_range(lo, hi); wb_drop_range(lo, hi); }   // TOTK: storage-shared textures and pending write-backs of this pool
+    if (hi > lo) { wb_drop_range(lo, hi); stor_drop_range(lo, hi); }   // TOTK: retire pending write-backs before dropping storage-shared textures
 }
 
 static pidx_ent *pool_query(uintptr_t addr, uint64_t len) { // caller holds g_mu
@@ -2578,11 +2578,19 @@ void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) {
    block factory with a pixel pattern 0x7a7a7a7b7b7a7774 where a free-list pointer belongs). On hardware the rendering
    already reached memory; here there is nobody left to write it for. */
 static void wb_drop_range(uintptr_t lo, uintptr_t hi) {
+    /* An old pending write-back must not target bytes reused by a new pool.
+       Compare without computing a + size, which could overflow uintptr_t. */
     pthread_mutex_lock(&g_smu);
-    for (uint32_t i = 0; i < g_wb.cap; i++) {
+    for (uint32_t i = 0; i < g_wb.cap && g_wb.n; i++) {
         wb_ent *e = g_wb.vals ? g_wb.vals[i] : NULL;
-        if (!e || (uintptr_t)e->t.mem >= hi || (uintptr_t)e->t.mem + e->t.L.size <= lo) continue;
-        uint64_t k = e->t.serial; nvn_hm_del(&g_wb, &k); wb_ent_free(e); i = (uint32_t)-1;   // deletion shifts entries: rescan
+        if (!e) continue;
+        uintptr_t a = (uintptr_t)e->t.mem;
+        if (a >= hi || (a < lo && e->t.L.size <= lo - a)) continue;
+        uint64_t k = e->t.serial;
+        nvn_hm_del(&g_wb, &k);
+        MLOG("[wb-lifetime] retired pending texture ser=%llu with pool %p..%p", (unsigned long long)k, (void *)lo, (void *)hi);
+        wb_ent_free(e);
+        i = (uint32_t)-1; // deletion shifts hash-map entries: rescan
     }
     pthread_mutex_unlock(&g_smu);
 }
@@ -2640,6 +2648,14 @@ static void wb_write_list_body(wb_ent **list, int nl, int force) {
        of several renderings of the same memory (texture objects over it) only the newest is written back. */
     int fresh[512];
     for (int i = 0; i < nl; i++) {
+        const tex_t *candidate=&list[i]->t;
+        pthread_mutex_lock(&g_mu);
+        int mapped=pidx_find_mut(&g_pools,(uintptr_t)candidate->mem,candidate->L.size)!=NULL;
+        pthread_mutex_unlock(&g_mu);
+        if (!mapped) {
+            MLOG("[wb-lifetime] rejected texture ser=%llu %ux%u at %p size=%#llx: no containing live pool",(unsigned long long)candidate->serial,candidate->d.width,candidate->d.height,candidate->mem,(unsigned long long)candidate->L.size);
+            fresh[i]=2; continue;
+        }
         fresh[i] = force || !nvn_dirty_since(list[i]->t.mem, list[i]->t.L.size, list[i]->stamp);
         if (!fresh[i] && list[i]->snap && list[i]->snap_n == list[i]->t.L.size && !memcmp(list[i]->snap, list[i]->t.mem, list[i]->snap_n)) {   // page dirty, texture's own bytes not
             fresh[i] = 1; if (++g_wb_exact_rescued <= 8) MLOG("[writeback] small target ser=%llu %ux%u: page written by the CPU but not this texture, written back", (unsigned long long)list[i]->t.serial, list[i]->t.d.width, list[i]->t.d.height); }

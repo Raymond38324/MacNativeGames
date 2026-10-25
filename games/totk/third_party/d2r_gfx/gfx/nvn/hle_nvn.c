@@ -402,6 +402,15 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8);
     nvn_tex_layout(&o->d, &o->L);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
+    /* TOTK: buffer length check on the texture-storage path. The game allocates the pool with
+       GetStorageSize (= L.size) and then writes (or lets the runtime copy) the packaged data into
+       [mem, mem + L.size). A texture whose storage runs past its pool would overrun into the next
+       heap object; log it red so the exact texture (dims / format / serial) is known before the
+       corruption becomes a distant memcpy crash. */
+    if (o->mem && o->L.size && (o->off < 0 || (uint64_t)o->off + o->L.size > o->pool->size))
+        LOG("【红】贴图 %p 存储越过内存池：%ux%ux%u lv%u fmt=%#x tgt=%d off=%lld size=%#llx > 池 %#llx（池 %p flags=%#x）",
+            (void *)t, o->d.width, o->d.height, o->d.depth, o->d.levels, o->d.format, o->d.target,
+            (long long)o->off, (unsigned long long)o->L.size, (unsigned long long)o->pool->size, (void *)o->pool->mem, o->pool->flags);
     if (s->pkg_data) {
         if (!o->mem) die("packaged texture data without CPU-visible storage");
         dm_guest_write_prepare(o->mem, (size_t)o->L.size);

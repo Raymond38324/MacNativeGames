@@ -255,12 +255,39 @@ void runtime_diag_xpoke(unsigned off,float value){
     fprintf(stderr,"[totk] xpoke X+%#x: %g -> %g\n",off,old,value);
 }
 #endif
+/* Darwin remaps 16 KiB pages. The NVN pool allocator's 4 KiB request
+   can return CPU-visible physical storage that cannot be aliased. Promote
+   that request before allocation; keep larger and signed alignments intact. */
+static void patch_pool_alignment(Module *m) {
+#if !TARGET_OS_IPHONE
+    const char *e=getenv("TOTK_POOL_ALIGN_FIX");
+    if(e&&!strcmp(e,"0"))return;
+    const uint64_t site=0x8cc774,stub=((m->text_end+15)&~15ULL)+944;
+    uint32_t got;memcpy(&got,m->base+site,4);
+    if(got!=0x2a0103e2||stub+40>((m->text_end+0x3fff)&~0x3fffULL))
+        runtime_fail("1.4.3 pool alignment patch layout mismatch");
+    for(unsigned i=0;i<40;i++)if(m->base[stub+i])runtime_fail("pool alignment veneer padding not empty");
+    /* Conditional branches stay local (imm19 has only +/-1 MiB range).
+       Use imm26 B instructions for the distant return to the allocator. */
+    uint32_t code[]={0x2a0103e2,0x7140043f,0x54000040,0,
+                     0xb94000a2,0x36400062,0x52880002,0,0x2a0103e2,0};
+    code[3]=branch(stub+12,site+4);
+    code[7]=branch(stub+28,site+4);
+    code[9]=branch(stub+36,site+4);
+    memcpy(m->base+stub,code,sizeof code);got=branch(site,stub);memcpy(m->base+site,&got,4);
+    fprintf(stderr,"[totk] 1.4.3 NVN pool allocation: 4 KiB alignment promoted to 16 KiB for Darwin aliases\n");
+#else
+    (void)m;
+#endif
+}
+
 static void patch_output_res(Module *m);
 static void patch_render_res(Module *m);
 static void patch_fixed_res(Module *m);
 void runtime_game_patches(Module *m) {
     runtime_survey_init(m);
     if (strcmp(m->name, "main")) runtime_fail("1.4.3 game patches expect main");
+    patch_pool_alignment(m);
     patch_realtime(m);
     patch_output_res(m);
     patch_render_res(m);
